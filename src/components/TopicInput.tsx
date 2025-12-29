@@ -7,9 +7,10 @@ interface TopicInputProps {
   onStartStream: (topic: string) => void;
   onStopStream: () => void;
   isStreaming: boolean;
+  isLoading?: boolean;
 }
 
-export const TopicInput = ({ onStartStream, onStopStream, isStreaming }: TopicInputProps) => {
+export const TopicInput = ({ onStartStream, onStopStream, isStreaming, isLoading = false }: TopicInputProps) => {
   const [inputValue, setInputValue] = useState("");
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -30,7 +31,7 @@ export const TopicInput = ({ onStartStream, onStopStream, isStreaming }: TopicIn
               placeholder="Enter topic or keyword (e.g., #AI, climate change, etc.)"
               value={inputValue}
               onChange={(e) => setInputValue(e.target.value)}
-              disabled={isStreaming}
+              disabled={isStreaming || isLoading}
               className="pl-12 h-14 bg-background/50 border-border/50 focus:border-primary transition-all text-lg"
             />
           </div>
@@ -38,11 +39,11 @@ export const TopicInput = ({ onStartStream, onStopStream, isStreaming }: TopicIn
             <Button 
               type="submit" 
               size="lg"
-              disabled={!inputValue.trim()}
+              disabled={!inputValue.trim() || isLoading}
               className="h-14 px-8 bg-gradient-primary hover:opacity-90 transition-all glow-effect"
             >
               <Play className="mr-2 h-5 w-5" />
-              Start Stream
+              {isLoading ? 'Connecting...' : 'Start Stream'}
             </Button>
           ) : (
             <Button 
@@ -50,10 +51,11 @@ export const TopicInput = ({ onStartStream, onStopStream, isStreaming }: TopicIn
               onClick={onStopStream}
               size="lg"
               variant="destructive"
+              disabled={isLoading}
               className="h-14 px-8"
             >
               <StopCircle className="mr-2 h-5 w-5" />
-              Stop
+              {isLoading ? 'Stopping...' : 'Stop'}
             </Button>
           )}
         </div>

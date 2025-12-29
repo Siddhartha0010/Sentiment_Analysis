@@ -1,25 +1,23 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { Header } from "@/components/Header";
 import { TopicInput } from "@/components/TopicInput";
 import { StatsCards } from "@/components/StatsCards";
 import { SentimentChart } from "@/components/SentimentChart";
 import { TweetStream } from "@/components/TweetStream";
+import { ConnectionStatus } from "@/components/ConnectionStatus";
 import { useSentimentData } from "@/hooks/useSentimentData";
 
 const Index = () => {
   const [topic, setTopic] = useState("");
-  const [isStreaming, setIsStreaming] = useState(false);
-  const { stats, chartData, tweets, startStream, stopStream } = useSentimentData();
+  const { stats, chartData, tweets, isStreaming, isLoading, isConnected, startStream, stopStream } = useSentimentData();
 
-  const handleStartStream = (searchTopic: string) => {
+  const handleStartStream = async (searchTopic: string) => {
     setTopic(searchTopic);
-    setIsStreaming(true);
-    startStream(searchTopic);
+    await startStream(searchTopic);
   };
 
-  const handleStopStream = () => {
-    setIsStreaming(false);
-    stopStream();
+  const handleStopStream = async () => {
+    await stopStream();
   };
 
   return (
@@ -39,10 +37,13 @@ const Index = () => {
             </p>
           </div>
 
+          <ConnectionStatus isConnected={isConnected} />
+
           <TopicInput 
             onStartStream={handleStartStream}
             onStopStream={handleStopStream}
             isStreaming={isStreaming}
+            isLoading={isLoading}
           />
 
           {isStreaming && (
