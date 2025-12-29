@@ -1,4 +1,7 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
+import { useWebSocket } from "./useWebSocket";
+import * as api from "@/lib/api";
+import { useToast } from "./use-toast";
 
 interface Stats {
   total: number;
@@ -25,34 +28,8 @@ interface Tweet {
   confidence: number;
 }
 
-const sampleTweets = [
-  "This is absolutely amazing! Love the innovation here. #excited",
-  "Disappointed with the recent changes. Not what we expected.",
-  "The weather is partly cloudy today.",
-  "Incredible breakthrough in technology! This will change everything.",
-  "Terrible service, very frustrating experience.",
-  "Just another day at work.",
-  "So grateful for all the support! Best community ever.",
-  "This is getting worse by the day. Unacceptable.",
-  "Meeting scheduled for 3 PM tomorrow.",
-  "Outstanding performance! Exceeded all expectations.",
-];
-
-const generateMockTweet = (topic: string): Tweet => {
-  const sentiments: ('positive' | 'negative' | 'neutral')[] = ['positive', 'negative', 'neutral'];
-  const sentiment = sentiments[Math.floor(Math.random() * sentiments.length)];
-  const baseText = sampleTweets[Math.floor(Math.random() * sampleTweets.length)];
-  
-  return {
-    id: `${Date.now()}-${Math.random()}`,
-    text: `${baseText} #${topic}`,
-    sentiment,
-    timestamp: new Date().toLocaleTimeString(),
-    confidence: 0.75 + Math.random() * 0.24,
-  };
-};
-
 export const useSentimentData = () => {
+  const { toast } = useToast();
   const [stats, setStats] = useState<Stats>({
     total: 0,
     positive: 0,
@@ -66,11 +43,26 @@ export const useSentimentData = () => {
   const [chartData, setChartData] = useState<ChartDataPoint[]>([]);
   const [tweets, setTweets] = useState<Tweet[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
-  const intervalRef = useRef<NodeJS.Timeout | null>(null);
-  const chartIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
   const currentTopic = useRef<string>("");
+  const statsPollingRef = useRef<NodeJS.Timeout | null>(null);
+  const chartPollingRef = useRef<NodeJS.Timeout | null>(null);
 
-  const updateStats = (newTweet: Tweet) => {
+  // WebSocket handlers
+  const handleTweet = useCallback((tweetData: any) => {
+    if (tweetData.topic !== currentTopic.current) return;
+
+    const newTweet: Tweet = {
+      id: tweetData.tweet_id || tweetData.id || `${Date.now()}-${Math.random()}`,
+      text: tweetData.tweet_text || tweetData.text,
+      sentiment: tweetData.sentiment,
+      timestamp: new Date(tweetData.created_at || tweetData.timestamp).toLocaleTimeString(),
+      confidence: tweetData.confidence || 0.85,
+    };
+
+    setTweets(prev => [newTweet, ...prev].slice(0, 50));
+    
+    // Update stats locally for immediate feedback
     setStats(prev => {
       const total = prev.total + 1;
       const positive = prev.positive + (newTweet.sentiment === 'positive' ? 1 : 0);
@@ -82,33 +74,123 @@ export const useSentimentData = () => {
         positive,
         negative,
         neutral,
-        positivePercent: Math.round((positive / total) * 100),
-        negativePercent: Math.round((negative / total) * 100),
-        neutralPercent: Math.round((neutral / total) * 100),
+        positivePercent: total > 0 ? Math.round((positive / total) * 100) : 0,
+        negativePercent: total > 0 ? Math.round((negative / total) * 100) : 0,
+        neutralPercent: total > 0 ? Math.round((neutral / total) * 100) : 0,
       };
     });
-  };
+  }, []);
 
-  const updateChartData = () => {
-    const now = new Date();
-    const timeStr = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+  const handleSentiment = useCallback((sentimentData: any) => {
+    if (sentimentData.topic !== currentTopic.current) return;
+    
+    // Update chart with new sentiment data point
+    const timeStr = new Date(sentimentData.timestamp).toLocaleTimeString('en-US', { 
+      hour: '2-digit', 
+      minute: '2-digit' 
+    });
     
     setChartData(prev => {
       const newPoint: ChartDataPoint = {
         time: timeStr,
-        positive: stats.positive,
-        negative: stats.negative,
-        neutral: stats.neutral,
+        positive: sentimentData.positive || 0,
+        negative: sentimentData.negative || 0,
+        neutral: sentimentData.neutral || 0,
       };
       
       const updated = [...prev, newPoint];
-      return updated.slice(-10); // Keep last 10 data points
+      return updated.slice(-20);
     });
-  };
+  }, []);
 
-  const startStream = (topic: string) => {
+  const handleStats = useCallback((statsData: any) => {
+    if (statsData.topic !== currentTopic.current) return;
+    
+    const total = statsData.total_tweets || 0;
+    setStats({
+      total,
+      positive: statsData.positive_count || 0,
+      negative: statsData.negative_count || 0,
+      neutral: statsData.neutral_count || 0,
+      positivePercent: total > 0 ? Math.round((statsData.positive_count / total) * 100) : 0,
+      negativePercent: total > 0 ? Math.round((statsData.negative_count / total) * 100) : 0,
+      neutralPercent: total > 0 ? Math.round((statsData.neutral_count / total) * 100) : 0,
+    });
+  }, []);
+
+  const handleAlert = useCallback((alertData: any) => {
+    toast({
+      title: "Sentiment Alert",
+      description: alertData.message || "Significant sentiment change detected",
+      variant: alertData.severity === 'high' ? 'destructive' : 'default',
+    });
+  }, [toast]);
+
+  const { isConnected, subscribe, unsubscribe } = useWebSocket({
+    onTweet: handleTweet,
+    onSentiment: handleSentiment,
+    onStats: handleStats,
+    onAlert: handleAlert,
+  });
+
+  // Fetch initial data and set up polling
+  const fetchStats = useCallback(async (topic: string) => {
+    try {
+      const statsData = await api.getSentimentStats(topic);
+      const total = statsData.total_tweets || 0;
+      setStats({
+        total,
+        positive: statsData.positive_count || 0,
+        negative: statsData.negative_count || 0,
+        neutral: statsData.neutral_count || 0,
+        positivePercent: total > 0 ? Math.round((statsData.positive_count / total) * 100) : 0,
+        negativePercent: total > 0 ? Math.round((statsData.negative_count / total) * 100) : 0,
+        neutralPercent: total > 0 ? Math.round((statsData.neutral_count / total) * 100) : 0,
+      });
+    } catch (error) {
+      console.error('Failed to fetch stats:', error);
+    }
+  }, []);
+
+  const fetchTemporalData = useCallback(async (topic: string) => {
+    try {
+      const temporal = await api.getTemporalSentiment(topic, '5m', 20);
+      const chartPoints: ChartDataPoint[] = temporal.map(point => ({
+        time: new Date(point.time_bucket).toLocaleTimeString('en-US', { 
+          hour: '2-digit', 
+          minute: '2-digit' 
+        }),
+        positive: point.positive,
+        negative: point.negative,
+        neutral: point.neutral,
+      }));
+      setChartData(chartPoints);
+    } catch (error) {
+      console.error('Failed to fetch temporal data:', error);
+    }
+  }, []);
+
+  const fetchRecentTweets = useCallback(async (topic: string) => {
+    try {
+      const recentTweets = await api.getRecentTweets(topic, 20);
+      const formattedTweets: Tweet[] = recentTweets.map(tweet => ({
+        id: tweet.id,
+        text: tweet.text,
+        sentiment: tweet.sentiment,
+        timestamp: new Date(tweet.timestamp).toLocaleTimeString(),
+        confidence: tweet.confidence,
+      }));
+      setTweets(formattedTweets);
+    } catch (error) {
+      console.error('Failed to fetch recent tweets:', error);
+    }
+  }, []);
+
+  const startStream = async (topic: string) => {
+    setIsLoading(true);
     currentTopic.current = topic;
-    setIsStreaming(true);
+
+    // Reset state
     setStats({
       total: 0,
       positive: 0,
@@ -121,43 +203,99 @@ export const useSentimentData = () => {
     setChartData([]);
     setTweets([]);
 
-    // Add tweets at varying intervals
-    intervalRef.current = setInterval(() => {
-      const newTweet = generateMockTweet(currentTopic.current);
-      setTweets(prev => [newTweet, ...prev].slice(0, 20)); // Keep last 20 tweets
-      updateStats(newTweet);
-    }, 2000 + Math.random() * 2000); // Random interval between 2-4 seconds
+    try {
+      // Start backend stream
+      await api.startStream(topic);
+      
+      // Subscribe to WebSocket topic
+      subscribe(topic);
+      
+      // Fetch initial data
+      await Promise.all([
+        fetchStats(topic),
+        fetchTemporalData(topic),
+        fetchRecentTweets(topic),
+      ]);
+      
+      setIsStreaming(true);
 
-    // Update chart every 5 seconds
-    chartIntervalRef.current = setInterval(() => {
-      updateChartData();
-    }, 5000);
+      // Set up polling for stats and chart data as backup
+      statsPollingRef.current = setInterval(() => fetchStats(topic), 10000);
+      chartPollingRef.current = setInterval(() => fetchTemporalData(topic), 5000);
+
+      toast({
+        title: "Stream Started",
+        description: `Now tracking sentiment for "${topic}"`,
+      });
+    } catch (error: any) {
+      console.error('Failed to start stream:', error);
+      toast({
+        title: "Failed to Start Stream",
+        description: error.message || "Could not connect to the streaming service",
+        variant: "destructive",
+      });
+    } finally {
+      setIsLoading(false);
+    }
   };
 
-  const stopStream = () => {
-    setIsStreaming(false);
-    if (intervalRef.current) {
-      clearInterval(intervalRef.current);
-      intervalRef.current = null;
-    }
-    if (chartIntervalRef.current) {
-      clearInterval(chartIntervalRef.current);
-      chartIntervalRef.current = null;
+  const stopStream = async () => {
+    setIsLoading(true);
+
+    try {
+      await api.stopStream();
+      
+      // Unsubscribe from WebSocket topic
+      if (currentTopic.current) {
+        unsubscribe(currentTopic.current);
+      }
+      
+      // Clear polling intervals
+      if (statsPollingRef.current) {
+        clearInterval(statsPollingRef.current);
+        statsPollingRef.current = null;
+      }
+      if (chartPollingRef.current) {
+        clearInterval(chartPollingRef.current);
+        chartPollingRef.current = null;
+      }
+
+      setIsStreaming(false);
+
+      toast({
+        title: "Stream Stopped",
+        description: `Stopped tracking "${currentTopic.current}"`,
+      });
+    } catch (error: any) {
+      console.error('Failed to stop stream:', error);
+      toast({
+        title: "Failed to Stop Stream",
+        description: error.message || "Could not stop the streaming service",
+        variant: "destructive",
+      });
+    } finally {
+      setIsLoading(false);
     }
   };
 
+  // Cleanup on unmount
   useEffect(() => {
     return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-      if (chartIntervalRef.current) clearInterval(chartIntervalRef.current);
+      if (statsPollingRef.current) clearInterval(statsPollingRef.current);
+      if (chartPollingRef.current) clearInterval(chartPollingRef.current);
+      if (currentTopic.current) {
+        unsubscribe(currentTopic.current);
+      }
     };
-  }, []);
+  }, [unsubscribe]);
 
   return {
     stats,
     chartData,
     tweets,
     isStreaming,
+    isLoading,
+    isConnected,
     startStream,
     stopStream,
   };
