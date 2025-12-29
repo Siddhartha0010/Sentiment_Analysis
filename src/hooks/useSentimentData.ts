@@ -28,6 +28,34 @@ interface Tweet {
   confidence: number;
 }
 
+// Demo data for when backend is unavailable
+const sampleTweets = [
+  "This is absolutely amazing! Love the innovation here. #excited",
+  "Disappointed with the recent changes. Not what we expected.",
+  "The weather is partly cloudy today.",
+  "Incredible breakthrough in technology! This will change everything.",
+  "Terrible service, very frustrating experience.",
+  "Just another day at work.",
+  "So grateful for all the support! Best community ever.",
+  "This is getting worse by the day. Unacceptable.",
+  "Meeting scheduled for 3 PM tomorrow.",
+  "Outstanding performance! Exceeded all expectations.",
+];
+
+const generateMockTweet = (topic: string): Tweet => {
+  const sentiments: ('positive' | 'negative' | 'neutral')[] = ['positive', 'negative', 'neutral'];
+  const sentiment = sentiments[Math.floor(Math.random() * sentiments.length)];
+  const baseText = sampleTweets[Math.floor(Math.random() * sampleTweets.length)];
+  
+  return {
+    id: `${Date.now()}-${Math.random()}`,
+    text: `${baseText} #${topic}`,
+    sentiment,
+    timestamp: new Date().toLocaleTimeString(),
+    confidence: 0.75 + Math.random() * 0.24,
+  };
+};
+
 export const useSentimentData = () => {
   const { toast } = useToast();
   const [stats, setStats] = useState<Stats>({
@@ -47,6 +75,8 @@ export const useSentimentData = () => {
   const currentTopic = useRef<string>("");
   const statsPollingRef = useRef<NodeJS.Timeout | null>(null);
   const chartPollingRef = useRef<NodeJS.Timeout | null>(null);
+  const demoIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const demoChartIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   // WebSocket handlers
   const handleTweet = useCallback((tweetData: any) => {
@@ -61,8 +91,10 @@ export const useSentimentData = () => {
     };
 
     setTweets(prev => [newTweet, ...prev].slice(0, 50));
-    
-    // Update stats locally for immediate feedback
+    updateStatsWithTweet(newTweet);
+  }, []);
+
+  const updateStatsWithTweet = (newTweet: Tweet) => {
     setStats(prev => {
       const total = prev.total + 1;
       const positive = prev.positive + (newTweet.sentiment === 'positive' ? 1 : 0);
@@ -79,12 +111,11 @@ export const useSentimentData = () => {
         neutralPercent: total > 0 ? Math.round((neutral / total) * 100) : 0,
       };
     });
-  }, []);
+  };
 
   const handleSentiment = useCallback((sentimentData: any) => {
     if (sentimentData.topic !== currentTopic.current) return;
     
-    // Update chart with new sentiment data point
     const timeStr = new Date(sentimentData.timestamp).toLocaleTimeString('en-US', { 
       hour: '2-digit', 
       minute: '2-digit' 
@@ -126,14 +157,56 @@ export const useSentimentData = () => {
     });
   }, [toast]);
 
-  const { isConnected, subscribe, unsubscribe } = useWebSocket({
+  const { isConnected, isDemoMode, subscribe, unsubscribe } = useWebSocket({
     onTweet: handleTweet,
     onSentiment: handleSentiment,
     onStats: handleStats,
     onAlert: handleAlert,
   });
 
-  // Fetch initial data and set up polling
+  // Demo mode functions
+  const startDemoMode = (topic: string) => {
+    // Generate mock tweets at intervals
+    demoIntervalRef.current = setInterval(() => {
+      const newTweet = generateMockTweet(topic);
+      setTweets(prev => [newTweet, ...prev].slice(0, 50));
+      updateStatsWithTweet(newTweet);
+    }, 2000 + Math.random() * 2000);
+
+    // Update chart every 5 seconds
+    demoChartIntervalRef.current = setInterval(() => {
+      const timeStr = new Date().toLocaleTimeString('en-US', { 
+        hour: '2-digit', 
+        minute: '2-digit' 
+      });
+      
+      setStats(currentStats => {
+        const newPoint: ChartDataPoint = {
+          time: timeStr,
+          positive: currentStats.positive,
+          negative: currentStats.negative,
+          neutral: currentStats.neutral,
+        };
+        
+        setChartData(prev => [...prev, newPoint].slice(-20));
+        
+        return currentStats;
+      });
+    }, 5000);
+  };
+
+  const stopDemoMode = () => {
+    if (demoIntervalRef.current) {
+      clearInterval(demoIntervalRef.current);
+      demoIntervalRef.current = null;
+    }
+    if (demoChartIntervalRef.current) {
+      clearInterval(demoChartIntervalRef.current);
+      demoChartIntervalRef.current = null;
+    }
+  };
+
+  // Real API functions
   const fetchStats = useCallback(async (topic: string) => {
     try {
       const statsData = await api.getSentimentStats(topic);
@@ -203,8 +276,20 @@ export const useSentimentData = () => {
     setChartData([]);
     setTweets([]);
 
+    // Check if we should use demo mode
+    if (isDemoMode) {
+      setIsStreaming(true);
+      startDemoMode(topic);
+      toast({
+        title: "Demo Mode Active",
+        description: `Showing simulated data for "${topic}". Deploy backend for live data.`,
+      });
+      setIsLoading(false);
+      return;
+    }
+
     try {
-      // Start backend stream
+      // Try to start backend stream
       await api.startStream(topic);
       
       // Subscribe to WebSocket topic
@@ -219,7 +304,7 @@ export const useSentimentData = () => {
       
       setIsStreaming(true);
 
-      // Set up polling for stats and chart data as backup
+      // Set up polling as backup
       statsPollingRef.current = setInterval(() => fetchStats(topic), 10000);
       chartPollingRef.current = setInterval(() => fetchTemporalData(topic), 5000);
 
@@ -229,10 +314,13 @@ export const useSentimentData = () => {
       });
     } catch (error: any) {
       console.error('Failed to start stream:', error);
+      
+      // Fall back to demo mode
+      setIsStreaming(true);
+      startDemoMode(topic);
       toast({
-        title: "Failed to Start Stream",
-        description: error.message || "Could not connect to the streaming service",
-        variant: "destructive",
+        title: "Demo Mode Active",
+        description: `Backend unavailable. Showing simulated data for "${topic}".`,
       });
     } finally {
       setIsLoading(false);
@@ -242,8 +330,13 @@ export const useSentimentData = () => {
   const stopStream = async () => {
     setIsLoading(true);
 
+    // Stop demo mode if active
+    stopDemoMode();
+
     try {
-      await api.stopStream();
+      if (!isDemoMode) {
+        await api.stopStream();
+      }
       
       // Unsubscribe from WebSocket topic
       if (currentTopic.current) {
@@ -268,11 +361,7 @@ export const useSentimentData = () => {
       });
     } catch (error: any) {
       console.error('Failed to stop stream:', error);
-      toast({
-        title: "Failed to Stop Stream",
-        description: error.message || "Could not stop the streaming service",
-        variant: "destructive",
-      });
+      setIsStreaming(false);
     } finally {
       setIsLoading(false);
     }
@@ -281,6 +370,7 @@ export const useSentimentData = () => {
   // Cleanup on unmount
   useEffect(() => {
     return () => {
+      stopDemoMode();
       if (statsPollingRef.current) clearInterval(statsPollingRef.current);
       if (chartPollingRef.current) clearInterval(chartPollingRef.current);
       if (currentTopic.current) {
@@ -295,7 +385,8 @@ export const useSentimentData = () => {
     tweets,
     isStreaming,
     isLoading,
-    isConnected,
+    isConnected: isConnected || isDemoMode,
+    isDemoMode,
     startStream,
     stopStream,
   };
