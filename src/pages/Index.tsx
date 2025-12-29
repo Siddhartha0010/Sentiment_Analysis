@@ -10,7 +10,7 @@ import { useSentimentData } from "@/hooks/useSentimentData";
 
 const Index = () => {
   const [topic, setTopic] = useState("");
-  const { stats, chartData, tweets, isStreaming, isLoading, isConnected, startStream, stopStream } = useSentimentData();
+  const { stats, chartData, tweets, isStreaming, isLoading, isConnected, isDemoMode, startStream, stopStream } = useSentimentData();
 
   const handleStartStream = async (searchTopic: string) => {
     setTopic(searchTopic);
@@ -54,7 +54,7 @@ const Index = () => {
               </p>
             </div>
 
-            <ConnectionStatus isConnected={isConnected} />
+            <ConnectionStatus isConnected={isConnected} isDemoMode={isDemoMode} />
 
             <div className="max-w-4xl mx-auto">
               <TopicInput 

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 
 const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:3001';
+const MAX_RECONNECT_ATTEMPTS = 3;
 
 export interface WebSocketMessage {
   type: 'tweet' | 'sentiment' | 'stats' | 'alert' | 'pong' | 'subscribed' | 'unsubscribed';
@@ -25,19 +26,29 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
     onStats,
     onAlert,
     autoReconnect = true,
-    reconnectInterval = 3000,
+    reconnectInterval = 5000,
   } = options;
 
   const [isConnected, setIsConnected] = useState(false);
+  const [isDemoMode, setIsDemoMode] = useState(false);
   const [lastMessage, setLastMessage] = useState<WebSocketMessage | null>(null);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const reconnectAttemptsRef = useRef(0);
   const subscribedTopicsRef = useRef<Set<string>>(new Set());
   const pingIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   const connect = useCallback(() => {
+    // Stop if we've exceeded max attempts
+    if (reconnectAttemptsRef.current >= MAX_RECONNECT_ATTEMPTS) {
+      console.log('Max reconnection attempts reached, switching to demo mode');
+      setIsDemoMode(true);
+      setConnectionError(null);
+      return;
+    }
+
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       return;
     }
@@ -48,7 +59,9 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
       wsRef.current.onopen = () => {
         console.log('WebSocket connected');
         setIsConnected(true);
+        setIsDemoMode(false);
         setConnectionError(null);
+        reconnectAttemptsRef.current = 0;
 
         // Resubscribe to topics
         subscribedTopicsRef.current.forEach((topic) => {
@@ -95,21 +108,28 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
           clearInterval(pingIntervalRef.current);
         }
 
-        if (autoReconnect) {
+        if (autoReconnect && reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS) {
+          reconnectAttemptsRef.current++;
+          console.log(`Reconnect attempt ${reconnectAttemptsRef.current}/${MAX_RECONNECT_ATTEMPTS}`);
           reconnectTimeoutRef.current = setTimeout(() => {
-            console.log('Attempting to reconnect...');
             connect();
           }, reconnectInterval);
+        } else if (reconnectAttemptsRef.current >= MAX_RECONNECT_ATTEMPTS) {
+          setIsDemoMode(true);
+          setConnectionError(null);
         }
       };
 
-      wsRef.current.onerror = (error) => {
-        console.error('WebSocket error:', error);
-        setConnectionError('WebSocket connection error');
+      wsRef.current.onerror = () => {
+        // Silently handle - onclose will trigger reconnection
+        setConnectionError('Connection failed');
       };
     } catch (error) {
       console.error('Failed to create WebSocket:', error);
-      setConnectionError('Failed to connect to server');
+      reconnectAttemptsRef.current++;
+      if (reconnectAttemptsRef.current >= MAX_RECONNECT_ATTEMPTS) {
+        setIsDemoMode(true);
+      }
     }
   }, [onTweet, onSentiment, onStats, onAlert, autoReconnect, reconnectInterval]);
 
@@ -125,6 +145,7 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
       wsRef.current = null;
     }
     setIsConnected(false);
+    reconnectAttemptsRef.current = 0;
   }, []);
 
   const subscribe = useCallback((topic: string) => {
@@ -154,6 +175,7 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
 
   return {
     isConnected,
+    isDemoMode,
     lastMessage,
     connectionError,
     subscribe,
