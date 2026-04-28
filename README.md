@@ -1,73 +1,160 @@
-# Welcome to your Lovable project
+# SentimentStream - Real-Time RSS Sentiment Analysis
 
-## Project info
+Real-time temporal sentiment analysis of RSS feeds using streaming NLP pipelines.
 
-**URL**: https://lovable.dev/projects/f2d8e101-d10d-4f3a-92ca-c60b0eecef2a
+## 🚀 Quick Start
 
-## How can I edit this code?
+**New to development?** Start here: **[SETUP_GUIDE.md](./SETUP_GUIDE.md)**
 
-There are several ways of editing your application.
+**Experienced developer?** See: **[QUICK_START.md](./QUICK_START.md)**
 
-**Use Lovable**
+**Want to verify your setup?** Check: **[VERIFY_SETUP.md](./VERIFY_SETUP.md)**
 
-Simply visit the [Lovable Project](https://lovable.dev/projects/f2d8e101-d10d-4f3a-92ca-c60b0eecef2a) and start prompting.
+---
 
-Changes made via Lovable will be committed automatically to this repo.
+## 📋 What You Need
 
-**Use your preferred IDE**
+- **Node.js** 20.x or higher
+- **Java JDK** 11 or higher (for Kafka)
+- **Kafka** 3.6.x
+- **MariaDB/MySQL** (optional - for data persistence)
+- **Memcached** (optional - for caching)
 
-If you want to work locally using your own IDE, you can clone this repo and push changes. Pushed changes will also be reflected in Lovable.
+---
 
-The only requirement is having Node.js & npm installed - [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating)
+## ⚡ Quick Setup (4 Steps)
 
-Follow these steps:
+1. **Install Prerequisites** (Node.js, Java, Kafka) - See [SETUP_GUIDE.md](./SETUP_GUIDE.md)
 
-```sh
-# Step 1: Clone the repository using the project's Git URL.
-git clone <YOUR_GIT_URL>
+2. **Start Kafka:**
+   ```bash
+   # Windows: Run start-kafka-windows.bat
+   # Mac/Linux: Run ./start-kafka.sh
+   # Or manually start Zookeeper then Kafka (see guide)
+   ```
 
-# Step 2: Navigate to the project directory.
-cd <YOUR_PROJECT_NAME>
+3. **Start Backend:**
+   ```bash
+   cd backend
+   npm install
+   npm start
+   ```
 
-# Step 3: Install the necessary dependencies.
-npm i
+4. **Start Frontend:**
+   ```bash
+   npm install
+   npm run dev
+   ```
 
-# Step 4: Start the development server with auto-reloading and an instant preview.
-npm run dev
+5. **Open Browser:** http://localhost:5173
+
+---
+
+## 📚 Documentation
+
+- **[SETUP_GUIDE.md](./SETUP_GUIDE.md)** - Complete beginner-friendly setup instructions
+- **[QUICK_START.md](./QUICK_START.md)** - TL;DR version for experienced developers
+- **[VERIFY_SETUP.md](./VERIFY_SETUP.md)** - Verification checklist
+- **[RSS_IMPLEMENTATION.md](./RSS_IMPLEMENTATION.md)** - RSS integration details
+- **[SENTIMENT_IMPLEMENTATION.md](./SENTIMENT_IMPLEMENTATION.md)** - Sentiment processing details
+- **[AGGREGATION_IMPLEMENTATION.md](./AGGREGATION_IMPLEMENTATION.md)** - Time-based aggregation details
+
+---
+
+## 🏗️ Architecture
+
+```
+RSS Feeds → Backend (Node.js) → Kafka → Sentiment Analysis → WebSocket → Dashboard
 ```
 
-**Edit a file directly in GitHub**
+- **RSS Service**: Polls RSS feeds every 5 seconds
+- **Sentiment Service**: Classifies text (positive/negative/neutral)
+- **Aggregation Service**: Groups by minute, calculates percentages
+- **WebSocket**: Real-time updates to dashboard
+- **Kafka**: Message streaming (optional for demo)
 
-- Navigate to the desired file(s).
-- Click the "Edit" button (pencil icon) at the top right of the file view.
-- Make your changes and commit the changes.
+---
 
-**Use GitHub Codespaces**
+## 🛠️ Technologies
 
-- Navigate to the main page of your repository.
-- Click on the "Code" button (green button) near the top right.
-- Select the "Codespaces" tab.
-- Click on "New codespace" to launch a new Codespace environment.
-- Edit files directly within the Codespace and commit and push your changes once you're done.
+**Backend:**
+- Node.js + Express
+- Kafka (message streaming)
+- RSS Parser (feed fetching)
+- Sentiment (AFINN-based classification)
+- WebSocket (real-time communication)
 
-## What technologies are used for this project?
+**Frontend:**
+- React + TypeScript
+- Vite (build tool)
+- shadcn-ui (component library)
+- Tailwind CSS (styling)
+- Recharts (data visualization)
 
-This project is built with:
+---
 
-- Vite
-- TypeScript
-- React
-- shadcn-ui
-- Tailwind CSS
+## 📝 Configuration
 
-## How can I deploy this project?
+**Backend** (`backend/.env`):
+```env
+PORT=3000
+KAFKA_BROKERS=localhost:9092
+RSS_FEED_URL=https://news.ycombinator.com/rss,https://feeds.bbci.co.uk/news/rss.xml
+```
 
-Simply open [Lovable](https://lovable.dev/projects/f2d8e101-d10d-4f3a-92ca-c60b0eecef2a) and click on Share -> Publish.
+**Frontend** (`.env` - optional):
+```env
+VITE_API_URL=http://localhost:3000
+VITE_WS_URL=ws://localhost:3000
+```
 
-## Can I connect a custom domain to my Lovable project?
+---
 
-Yes, you can!
+## 🐛 Troubleshooting
 
-To connect a domain, navigate to Project > Settings > Domains and click Connect Domain.
+See [SETUP_GUIDE.md - Troubleshooting Section](./SETUP_GUIDE.md#troubleshooting)
 
-Read more here: [Setting up a custom domain](https://docs.lovable.dev/features/custom-domain#custom-domain)
+Common issues:
+- Kafka connection failed → Check Kafka is running
+- Port already in use → Change PORT in `.env`
+- Module not found → Run `npm install`
+- Frontend shows "Demo Mode" → Backend not running
+
+---
+
+## 📖 Project Structure
+
+```
+sentiment/stream-sentiment/
+├── backend/              # Node.js backend
+│   ├── services/        # RSS, Kafka, Sentiment, WebSocket
+│   ├── routes/          # API endpoints
+│   └── .env            # Backend configuration
+├── src/                 # React frontend
+│   ├── components/     # UI components
+│   ├── hooks/          # React hooks
+│   └── lib/            # API client
+├── db/                  # Database schema
+└── spark/              # Spark ML (optional)
+```
+
+---
+
+## 🎯 Features
+
+- ✅ Real-time RSS feed streaming
+- ✅ Sentiment classification (positive/negative/neutral)
+- ✅ Time-based aggregation (minute buckets)
+- ✅ Real-time dashboard updates via WebSocket
+- ✅ Kafka integration for scalable message streaming
+- ✅ Beautiful, responsive UI (no changes needed)
+
+---
+
+## 📄 License
+
+MIT
+
+---
+
+**Need help?** Check the [SETUP_GUIDE.md](./SETUP_GUIDE.md) for detailed instructions!

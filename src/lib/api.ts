@@ -1,4 +1,4 @@
-const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000';
 
 export interface ApiStats {
   topic: string;
@@ -11,11 +11,12 @@ export interface ApiStats {
 }
 
 export interface TemporalDataPoint {
+  /** ISO time string or bucket label from the API */
   time_bucket: string;
   positive: number;
   negative: number;
   neutral: number;
-  total: number;
+  total?: number;
 }
 
 export interface Tweet {
@@ -25,150 +26,184 @@ export interface Tweet {
   timestamp: string;
   confidence: number;
   topic?: string;
+  publishedAt?: string;
+  processedAt?: string;
+  reasonKeywords?: string[];
+  sentimentReason?: string;
+   /** Explainable sentiment words (alias over reasonKeywords) */
+  explanation?: string[];
 }
 
 export interface StreamStatus {
-  status: 'streaming' | 'stopped';
+  isStreaming: boolean;
   topic: string | null;
-  ruleId: string | null;
-  tweetCount: number;
+  feedCount?: number;
 }
 
-// Start streaming for a topic
-export const startStream = async (topic: string): Promise<{ success: boolean; ruleId?: string; message?: string }> => {
+export const startStream = async (
+  topic: string,
+  feedUrls?: string[]
+): Promise<{ success: boolean; topic?: string; message?: string }> => {
   const response = await fetch(`${API_BASE_URL}/api/stream/start`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ topic }),
+    body: JSON.stringify({ topic, feedUrls }),
   });
-  
   if (!response.ok) {
     const error = await response.json();
     throw new Error(error.error || 'Failed to start stream');
   }
-  
   return response.json();
 };
 
-// Stop streaming
 export const stopStream = async (): Promise<{ success: boolean }> => {
-  const response = await fetch(`${API_BASE_URL}/api/stream/stop`, {
-    method: 'POST',
-  });
-  
-  if (!response.ok) {
-    throw new Error('Failed to stop stream');
-  }
-  
+  const response = await fetch(`${API_BASE_URL}/api/stream/stop`, { method: 'POST' });
+  if (!response.ok) throw new Error('Failed to stop stream');
   return response.json();
 };
 
-// Get stream status
 export const getStreamStatus = async (): Promise<StreamStatus> => {
   const response = await fetch(`${API_BASE_URL}/api/stream/status`);
-  
-  if (!response.ok) {
-    throw new Error('Failed to get stream status');
-  }
-  
+  if (!response.ok) throw new Error('Failed to get stream status');
   return response.json();
 };
 
-// Get sentiment stats for a topic
-export const getSentimentStats = async (topic: string): Promise<ApiStats> => {
-  const response = await fetch(`${API_BASE_URL}/api/sentiment/stats/${encodeURIComponent(topic)}`);
-  
+/**
+ * Get sentiment stats for a topic.
+ * timeRange must be passed so the cache key in api.js / cache.js is correct.
+ * Defaults to '1h' (matches the dashboard default view).
+ */
+export const getSentimentStats = async (
+  topic: string,
+  timeRange: string = '1h'
+): Promise<ApiStats> => {
+  const params = new URLSearchParams({ timeRange });
+  const response = await fetch(
+    `${API_BASE_URL}/api/sentiment/stats/${encodeURIComponent(topic)}?${params}`
+  );
   if (!response.ok) {
     throw new Error('Failed to fetch sentiment stats');
   }
-  
   return response.json();
 };
 
-// Get temporal sentiment data
+/**
+ * Get temporal sentiment data.
+ * Backend returns { topic, timeRange, interval, data: [...] }
+ */
 export const getTemporalSentiment = async (
   topic: string,
-  interval: string = '5m',
-  limit: number = 20
+  timeRange: string = '1h',
+  interval: string = '1m'
 ): Promise<TemporalDataPoint[]> => {
-  const params = new URLSearchParams({ interval, limit: limit.toString() });
+  const params = new URLSearchParams({ timeRange, interval });
   const response = await fetch(
     `${API_BASE_URL}/api/sentiment/temporal/${encodeURIComponent(topic)}?${params}`
   );
-  
   if (!response.ok) {
     throw new Error('Failed to fetch temporal sentiment');
   }
-  
-  return response.json();
+  const body = await response.json();
+  const rows = Array.isArray(body) ? body : body.data || [];
+  return rows.map((point: Record<string, unknown>) => {
+    const t = (point.time ?? point.time_bucket) as string;
+    return {
+      time_bucket: t,
+      positive: Number(point.positive) || 0,
+      negative: Number(point.negative) || 0,
+      neutral:  Number(point.neutral)  || 0,
+      total:    typeof point.total === 'number' ? point.total : undefined,
+    };
+  });
 };
 
-// Get recent tweets for a topic
-export const getRecentTweets = async (topic: string, limit: number = 20): Promise<Tweet[]> => {
+/**
+ * Get recent tweets / headlines for a topic.
+ * limit is passed as a query param so cache.js generates a unique key per limit.
+ */
+export const getRecentTweets = async (
+  topic: string,
+  limit: number = 20
+): Promise<Tweet[]> => {
   const params = new URLSearchParams({ limit: limit.toString() });
   const response = await fetch(
     `${API_BASE_URL}/api/tweets/${encodeURIComponent(topic)}?${params}`
   );
-  
   if (!response.ok) {
     throw new Error('Failed to fetch recent tweets');
   }
-  
   const data = await response.json();
-  return data.map((tweet: any) => ({
-    id: tweet.tweet_id || tweet.id,
-    text: tweet.tweet_text || tweet.text,
-    sentiment: tweet.sentiment,
-    timestamp: tweet.created_at || tweet.timestamp,
-    confidence: tweet.confidence,
-    topic: tweet.topic,
+  const list = Array.isArray(data) ? data : data.tweets || [];
+  return list.map((tweet: Record<string, unknown>) => ({
+    id:         (tweet.tweet_id  ?? tweet.id)        as string,
+    text:       (tweet.tweet_text ?? tweet.text)      as string,
+    sentiment:  tweet.sentiment                        as Tweet['sentiment'],
+    timestamp:  (tweet.created_at ?? tweet.timestamp) as string,
+    confidence: tweet.confidence                       as number,
+    topic:      tweet.topic                            as string | undefined,
+    publishedAt: (tweet.published_at ?? tweet.created_at) as string | undefined,
+    processedAt: (tweet.processed_at as string | undefined),
+    reasonKeywords: (tweet.reason_keywords as string[] | undefined),
+    explanation:
+      (tweet.explanation as string[] | undefined) ??
+      (tweet.reason_keywords as string[] | undefined),
+    sentimentReason: (tweet.sentiment_reason as string | undefined),
   }));
 };
 
-// Get trending topics
-export const getTrendingTopics = async (limit: number = 10): Promise<{ topic: string; count: number }[]> => {
+/**
+ * Get trending topics.
+ * Backend returns { topics: [...] } with tweet_count per row.
+ */
+export const getTrendingTopics = async (
+  limit: number = 10
+): Promise<{ topic: string; count: number }[]> => {
   const params = new URLSearchParams({ limit: limit.toString() });
   const response = await fetch(`${API_BASE_URL}/api/trending?${params}`);
-  
   if (!response.ok) {
     throw new Error('Failed to fetch trending topics');
   }
-  
-  return response.json();
+  const body = await response.json();
+  const rows = body.topics ?? body;
+  const list = Array.isArray(rows) ? rows : [];
+  return list.map((row: { topic?: string; tweet_count?: number; count?: number }) => ({
+    topic: row.topic ?? '',
+    count: row.tweet_count ?? row.count ?? 0,
+  }));
 };
 
-// Search tweets
-export const searchTweets = async (
-  query: string,
-  options: { sentiment?: string; limit?: number; offset?: number } = {}
-): Promise<Tweet[]> => {
-  const params = new URLSearchParams({ q: query });
-  if (options.sentiment) params.append('sentiment', options.sentiment);
-  if (options.limit) params.append('limit', options.limit.toString());
-  if (options.offset) params.append('offset', options.offset.toString());
-  
-  const response = await fetch(`${API_BASE_URL}/api/search?${params}`);
-  
-  if (!response.ok) {
-    throw new Error('Failed to search tweets');
-  }
-  
-  return response.json();
-};
-
-// Get system status
+/**
+ * Get system status.
+ * Cached for 5 seconds server-side (api.js), so calling this on every
+ * dashboard heartbeat is safe.
+ */
 export const getSystemStatus = async (): Promise<{
   database: boolean;
   cache: boolean;
   kafka: boolean;
-  twitter: boolean;
   websocket: { connections: number };
 }> => {
   const response = await fetch(`${API_BASE_URL}/api/status`);
-  
   if (!response.ok) {
     throw new Error('Failed to fetch system status');
   }
-  
+  return response.json();
+};
+
+export interface TopicInsightKeyword {
+  word: string;
+  count: number;
+}
+
+/** Rolling-window keywords + last spike message (lightweight GET) */
+export const getTopicInsights = async (
+  topic: string
+): Promise<{ topic: string; topKeywords: TopicInsightKeyword[]; latestAlert: string | null }> => {
+  const response = await fetch(
+    `${API_BASE_URL}/api/insights/${encodeURIComponent(topic)}`
+  );
+  if (!response.ok) {
+    throw new Error('Failed to fetch topic insights');
+  }
   return response.json();
 };

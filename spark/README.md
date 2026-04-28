@@ -5,8 +5,8 @@ Real-time sentiment analysis pipeline using Apache Spark Streaming with NLP and 
 ## Architecture
 
 ```
-Twitter API → Kafka (tweet_topic) → Spark Streaming → [NLP Pipeline] → Kafka (sentiment_topic)
-                                                                     → MariaDB
+RSS Feed → Kafka (tweet_topic) → Spark Streaming → [NLP Pipeline] → Kafka (sentiment_topic)
+                                                                  → MariaDB
 ```
 
 ## NLP Pipeline
@@ -65,16 +65,6 @@ spark-submit \
   sentiment_analysis.py
 ```
 
-### Docker
-
-```bash
-docker build -t sentiment-spark .
-docker run -e KAFKA_BROKERS=kafka:9092 sentiment-spark
-```
-
-### Kubernetes
-
-Deployed automatically with the Spark deployment in k8s/spark-deployment.yaml
 
 ## Environment Variables
 
@@ -99,13 +89,6 @@ Expected metrics on Sentiment140:
 
 ## Customization
 
-### Adding Custom Stop Words
-
-Edit `utils.py` and extend the stop words list:
-
-```python
-CUSTOM_STOP_WORDS = ["custom", "words", "here"]
-```
 
 ### Adjusting TF-IDF Parameters
 

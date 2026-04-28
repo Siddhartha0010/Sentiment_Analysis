@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { TrendingUp, Hash, ThumbsUp, ThumbsDown, Minus, RefreshCw } from "lucide-react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -24,6 +24,7 @@ export const TrendingSidebar = ({ onTopicSelect, isStreaming }: TrendingSidebarP
   const [topics, setTopics] = useState<TrendingTopic[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const wasStreamingRef = useRef(false);
 
   const fetchTrendingTopics = async () => {
     setIsLoading(true);
@@ -69,6 +70,15 @@ export const TrendingSidebar = ({ onTopicSelect, isStreaming }: TrendingSidebarP
     const interval = setInterval(fetchTrendingTopics, 60000); // Refresh every minute
     return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    if (isStreaming && !wasStreamingRef.current) {
+      wasStreamingRef.current = true;
+      const t = setTimeout(() => fetchTrendingTopics(), 1200);
+      return () => clearTimeout(t);
+    }
+    if (!isStreaming) wasStreamingRef.current = false;
+  }, [isStreaming]);
 
   const getSentimentPercentages = (topic: TrendingTopic) => {
     const total = (topic.positive || 0) + (topic.negative || 0) + (topic.neutral || 0);
@@ -147,7 +157,7 @@ export const TrendingSidebar = ({ onTopicSelect, isStreaming }: TrendingSidebarP
                       </span>
                     </div>
                     <span className="text-xs text-muted-foreground">
-                      {topic.count.toLocaleString()} tweets
+                      {topic.count.toLocaleString()} articles
                     </span>
                   </div>
 

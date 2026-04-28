@@ -1,138 +1,132 @@
-const Memcached = require('memcached');
-const logger = require('../utils/logger');
+"use strict";
+/**
+ * cache.js  —  Memcached Cache Layer (Rewritten)
+ * =================================================
+ * KEY CHANGES vs original
+ * ────────────────────────
+ * 1. BUG FIX → cacheSentimentStats / getCachedSentimentStats now accept
+ *              `timeRange` as a parameter and include it in the cache key.
+ *              Previously `1h` and `24h` collided on the same key.
+ *
+ * 2. BUG FIX → cacheRecentTweets / getCachedRecentTweets now accept
+ *              `limit` as a parameter and include it in the cache key.
+ *              Previously limit=20 and limit=50 returned the same cached data.
+ *
+ * 3. BUG FIX → invalidateTopicCache now deletes tweet keys for all common
+ *              limit variants (20, 50, 100) instead of silently leaving
+ *              stale tweet caches after a stream restart.
+ *
+ * 4. CLEAN  → All low-level helpers (get/set/del/increment/getOrSet) and
+ *              all other public signatures are UNCHANGED — drop-in replacement.
+ */
+
+const Memcached = require("memcached");
+const logger    = require("../utils/logger");
 
 let memcached = null;
 
 const CACHE_CONFIG = {
-  servers: process.env.MEMCACHED_SERVERS || 'localhost:11211',
+  servers: process.env.MEMCACHED_SERVERS || "localhost:11211",
   options: {
-    retries: 3,
-    retry: 10000,
-    timeout: 5000,
+    retries:  3,
+    retry:    10_000,
+    timeout:  5_000,
     failures: 3,
-    poolSize: 10
-  }
+    poolSize: 10,
+  },
 };
 
-// Default TTL values (in seconds)
+// Default TTL values (seconds)
 const TTL = {
-  STATS: 30,           // 30 seconds for real-time stats
-  TRENDING: 60,        // 1 minute for trending topics
-  TWEETS: 120,         // 2 minutes for tweet lists
-  TEMPORAL: 60,        // 1 minute for temporal data
-  ALERTS: 300          // 5 minutes for alerts
+  STATS:    30,   // real-time sentiment stats
+  TRENDING: 60,   // trending topics sidebar
+  TWEETS:   120,  // recent tweet lists
+  TEMPORAL: 60,   // chart time-series data
+  ALERTS:   300,  // alert history
 };
 
-/**
- * Initialize Memcached connection
- */
+// ─────────────────────────────────────────────────────────────────────────────
+// Lifecycle
+// ─────────────────────────────────────────────────────────────────────────────
 async function initializeCache() {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     try {
       memcached = new Memcached(CACHE_CONFIG.servers, CACHE_CONFIG.options);
-      
-      // Test connection
+
       memcached.stats((err, stats) => {
         if (err) {
-          logger.warn('Memcached connection failed, running without cache:', err.message);
+          logger.warn("Memcached connection failed, running without cache:", err.message);
           memcached = null;
           resolve(null);
         } else {
-          logger.info('Memcached connected', { servers: CACHE_CONFIG.servers });
+          logger.info("Memcached connected", { servers: CACHE_CONFIG.servers });
           resolve(memcached);
         }
       });
 
-      // Handle errors
-      memcached.on('failure', (details) => {
-        logger.error('Memcached server failure:', details);
-      });
-
-      memcached.on('reconnecting', (details) => {
-        logger.info('Memcached reconnecting:', details);
-      });
-
-    } catch (error) {
-      logger.warn('Failed to initialize Memcached:', error.message);
+      memcached.on("failure",     (d) => logger.error("Memcached server failure:", d));
+      memcached.on("reconnecting",(d) => logger.info("Memcached reconnecting:", d));
+    } catch (err) {
+      logger.warn("Failed to initialize Memcached:", err.message);
       resolve(null);
     }
   });
 }
 
-/**
- * Generate cache key
- */
-function generateKey(prefix, ...parts) {
-  return `sentiment:${prefix}:${parts.join(':')}`.replace(/[^a-zA-Z0-9:_-]/g, '_');
+function closeCache() {
+  if (memcached) {
+    memcached.end();
+    logger.info("Memcached connection closed");
+  }
 }
 
-/**
- * Get value from cache
- */
+// ─────────────────────────────────────────────────────────────────────────────
+// Low-level primitives (UNCHANGED)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Build a safe Memcached key — no spaces, slashes or special chars */
+function generateKey(prefix, ...parts) {
+  return `sentiment:${prefix}:${parts.join(":")}`.replace(/[^a-zA-Z0-9:_-]/g, "_");
+}
+
 async function get(key) {
   if (!memcached) return null;
-
   return new Promise((resolve) => {
     memcached.get(key, (err, data) => {
-      if (err) {
-        logger.debug('Cache get error:', err.message);
-        resolve(null);
-      } else {
-        resolve(data ? JSON.parse(data) : null);
-      }
+      if (err) { logger.debug("Cache get error:", err.message); resolve(null); return; }
+      resolve(data ? JSON.parse(data) : null);
     });
   });
 }
 
-/**
- * Set value in cache
- */
 async function set(key, value, ttl = 60) {
   if (!memcached) return false;
-
   return new Promise((resolve) => {
     memcached.set(key, JSON.stringify(value), ttl, (err) => {
-      if (err) {
-        logger.debug('Cache set error:', err.message);
-        resolve(false);
-      } else {
-        resolve(true);
-      }
+      if (err) { logger.debug("Cache set error:", err.message); resolve(false); return; }
+      resolve(true);
     });
   });
 }
 
-/**
- * Delete value from cache
- */
 async function del(key) {
   if (!memcached) return false;
-
   return new Promise((resolve) => {
     memcached.del(key, (err) => {
-      if (err) {
-        logger.debug('Cache delete error:', err.message);
-        resolve(false);
-      } else {
-        resolve(true);
-      }
+      if (err) { logger.debug("Cache delete error:", err.message); resolve(false); return; }
+      resolve(true);
     });
   });
 }
 
-/**
- * Increment counter in cache
- */
 async function increment(key, amount = 1) {
   if (!memcached) return null;
-
   return new Promise((resolve) => {
     memcached.incr(key, amount, (err, result) => {
       if (err) {
-        // Key might not exist, try to set it
-        memcached.set(key, amount.toString(), TTL.STATS, (setErr) => {
-          resolve(setErr ? null : amount);
-        });
+        memcached.set(key, amount.toString(), TTL.STATS, (setErr) =>
+          resolve(setErr ? null : amount)
+        );
       } else {
         resolve(result);
       }
@@ -140,131 +134,110 @@ async function increment(key, amount = 1) {
   });
 }
 
-/**
- * Get or set cache with callback
- */
 async function getOrSet(key, ttl, fetchFn) {
   const cached = await get(key);
-  if (cached !== null) {
-    return cached;
-  }
-
+  if (cached !== null) return cached;
   const data = await fetchFn();
   await set(key, data, ttl);
   return data;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Domain helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
- * Cache sentiment stats
+ * Sentiment stats
+ * FIX: timeRange is now part of the cache key so "1h" and "24h" don't collide.
+ * api.js calls: cacheSentimentStats(topic, timeRange, result)
  */
-async function cacheSentimentStats(topic, stats) {
-  const key = generateKey('stats', topic);
+async function cacheSentimentStats(topic, timeRange, stats) {
+  const key = generateKey("stats", topic, timeRange);  // ← FIX
   return set(key, stats, TTL.STATS);
 }
 
-/**
- * Get cached sentiment stats
- */
-async function getCachedSentimentStats(topic) {
-  const key = generateKey('stats', topic);
+async function getCachedSentimentStats(topic, timeRange) {
+  const key = generateKey("stats", topic, timeRange);  // ← FIX
   return get(key);
 }
 
-/**
- * Cache trending topics
- */
+// ── Trending topics (unchanged — no extra dimension needed) ──────────────────
 async function cacheTrendingTopics(topics) {
-  const key = generateKey('trending', 'all');
-  return set(key, topics, TTL.TRENDING);
+  return set(generateKey("trending", "all"), topics, TTL.TRENDING);
 }
 
-/**
- * Get cached trending topics
- */
 async function getCachedTrendingTopics() {
-  const key = generateKey('trending', 'all');
-  return get(key);
+  return get(generateKey("trending", "all"));
 }
 
 /**
- * Cache recent tweets
+ * Recent tweets
+ * FIX: limit is now part of the cache key so limit=20 and limit=50 don't collide.
+ * api.js calls: cacheRecentTweets(topic, limit, tweets)
  */
-async function cacheRecentTweets(topic, tweets) {
-  const key = generateKey('tweets', topic);
+async function cacheRecentTweets(topic, limit, tweets) {
+  const key = generateKey("tweets", topic, String(limit));  // ← FIX
   return set(key, tweets, TTL.TWEETS);
 }
 
-/**
- * Get cached recent tweets
- */
-async function getCachedRecentTweets(topic) {
-  const key = generateKey('tweets', topic);
+async function getCachedRecentTweets(topic, limit) {
+  const key = generateKey("tweets", topic, String(limit));  // ← FIX
   return get(key);
 }
 
-/**
- * Cache temporal sentiment data
- */
+// ── Temporal chart data (unchanged — topic+timeRange already unique) ──────────
 async function cacheTemporalData(topic, timeRange, data) {
-  const key = generateKey('temporal', topic, timeRange);
-  return set(key, data, TTL.TEMPORAL);
+  return set(generateKey("temporal", topic, timeRange), data, TTL.TEMPORAL);
 }
 
-/**
- * Get cached temporal sentiment data
- */
 async function getCachedTemporalData(topic, timeRange) {
-  const key = generateKey('temporal', topic, timeRange);
-  return get(key);
+  return get(generateKey("temporal", topic, timeRange));
 }
 
-/**
- * Invalidate all caches for a topic
- */
+// ─────────────────────────────────────────────────────────────────────────────
+// Cache invalidation
+// ─────────────────────────────────────────────────────────────────────────────
+
+// All timeRange values used by the frontend
+const TIME_RANGES  = ["5m", "1h", "6h", "24h"];
+// All limit values used by the frontend (matches api.js max of 100)
+const TWEET_LIMITS = ["20", "50", "100"];           // ← FIX: cover all limit variants
+
 async function invalidateTopicCache(topic) {
   const keys = [
-    generateKey('stats', topic),
-    generateKey('tweets', topic),
-    generateKey('temporal', topic, '1h'),
-    generateKey('temporal', topic, '6h'),
-    generateKey('temporal', topic, '24h')
+    // Stats — one key per timeRange
+    ...TIME_RANGES.map((tr) => generateKey("stats", topic, tr)),
+    // Tweets — one key per limit variant              ← FIX
+    ...TWEET_LIMITS.map((lim) => generateKey("tweets", topic, lim)),
+    // Temporal — one key per timeRange
+    ...TIME_RANGES.map((tr) => generateKey("temporal", topic, tr)),
   ];
 
-  await Promise.all(keys.map(key => del(key)));
-  logger.debug(`Cache invalidated for topic: ${topic}`);
+  await Promise.all(keys.map((k) => del(k)));
+  logger.debug(`Cache invalidated for topic: ${topic} (${keys.length} keys)`);
 }
 
-/**
- * Get cache status
- */
-async function getCacheStatus() {
-  if (!memcached) {
-    return { connected: false, servers: CACHE_CONFIG.servers };
-  }
+async function invalidateTrendingCache() {
+  await del(generateKey("trending", "all"));
+  logger.debug("Trending cache invalidated");
+}
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Status
+// ─────────────────────────────────────────────────────────────────────────────
+async function getCacheStatus() {
+  if (!memcached) return { connected: false, servers: CACHE_CONFIG.servers };
   return new Promise((resolve) => {
     memcached.stats((err, stats) => {
-      resolve({
-        connected: !err,
-        servers: CACHE_CONFIG.servers,
-        stats: stats || null
-      });
+      resolve({ connected: !err, servers: CACHE_CONFIG.servers, stats: stats || null });
     });
   });
 }
 
-/**
- * Close cache connection
- */
-function closeCache() {
-  if (memcached) {
-    memcached.end();
-    logger.info('Memcached connection closed');
-  }
-}
-
+// ─────────────────────────────────────────────────────────────────────────────
 module.exports = {
   initializeCache,
+  closeCache,
   get,
   set,
   del,
@@ -279,7 +252,7 @@ module.exports = {
   cacheTemporalData,
   getCachedTemporalData,
   invalidateTopicCache,
+  invalidateTrendingCache,
   getCacheStatus,
-  closeCache,
-  TTL
+  TTL,
 };

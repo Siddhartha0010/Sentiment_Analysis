@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Search, Play, StopCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -8,10 +8,17 @@ interface TopicInputProps {
   onStopStream: () => void;
   isStreaming: boolean;
   isLoading?: boolean;
+  currentTopic?: string;
+  /** Shown when streaming but no rows yet (slow RSS / rare queries) */
+  loadingHint?: string | null;
 }
 
-export const TopicInput = ({ onStartStream, onStopStream, isStreaming, isLoading = false }: TopicInputProps) => {
-  const [inputValue, setInputValue] = useState("");
+export const TopicInput = ({ onStartStream, onStopStream, isStreaming, isLoading = false, currentTopic = "", loadingHint = null }: TopicInputProps) => {
+  const [inputValue, setInputValue] = useState(currentTopic);
+
+  useEffect(() => {
+    if (currentTopic) setInputValue(currentTopic);
+  }, [currentTopic]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -28,7 +35,7 @@ export const TopicInput = ({ onStartStream, onStopStream, isStreaming, isLoading
             <Search className="absolute left-4 top-1/2 transform -translate-y-1/2 text-muted-foreground h-5 w-5" />
             <Input
               type="text"
-              placeholder="Enter topic or keyword (e.g., #AI, climate change, etc.)"
+              placeholder="Topic or keywords (e.g. IPL, Ukraine war, climate — shorter queries often load faster)"
               value={inputValue}
               onChange={(e) => setInputValue(e.target.value)}
               disabled={isStreaming || isLoading}
@@ -60,9 +67,14 @@ export const TopicInput = ({ onStartStream, onStopStream, isStreaming, isLoading
           )}
         </div>
         {isStreaming && (
-          <div className="flex items-center justify-center gap-2 text-accent">
-            <div className="w-2 h-2 rounded-full bg-accent animate-pulse" />
-            <span className="text-sm font-medium">Streaming live data for: {inputValue}</span>
+          <div className="space-y-2 text-center">
+            <div className="flex items-center justify-center gap-2 text-accent">
+              <div className="w-2 h-2 rounded-full bg-accent animate-pulse" />
+              <span className="text-sm font-medium">Streaming live data for: {inputValue}</span>
+            </div>
+            {loadingHint && (
+              <p className="text-xs text-muted-foreground max-w-lg mx-auto leading-relaxed">{loadingHint}</p>
+            )}
           </div>
         )}
       </form>

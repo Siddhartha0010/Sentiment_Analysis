@@ -1,345 +1,199 @@
-"""
-Model Training Script for Sentiment Analysis
-Trains Logistic Regression classifier on Sentiment140 dataset
-"""
-
 import os
 import sys
 import logging
 import argparse
+import re
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, when, udf
+from pyspark.sql.functions import col, udf, when
 from pyspark.sql.types import StringType
 from pyspark.ml import Pipeline
 from pyspark.ml.feature import (
-    Tokenizer, StopWordsRemover, HashingTF, IDF,
-    StringIndexer, IndexToString
+    Tokenizer, StopWordsRemover, CountVectorizer, IDF,
+    StringIndexer, IndexToString, NGram, VectorAssembler
 )
-from pyspark.ml.classification import LogisticRegression
+from pyspark.ml.classification import LogisticRegression, NaiveBayes
 from pyspark.ml.evaluation import MulticlassClassificationEvaluator
-from pyspark.ml.tuning import ParamGridBuilder, CrossValidator
-import re
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+# Explicitly use standard python executable
+os.environ["PYSPARK_PYTHON"] = sys.executable
+os.environ["PYSPARK_DRIVER_PYTHON"] = sys.executable
+
+# Ensure NLTK resources
+import nltk
+from nltk.stem import WordNetLemmatizer
+from nltk.corpus import stopwords
+nltk.download('wordnet', quiet=True)
+nltk.download('omw-1.4', quiet=True)
+nltk.download('stopwords', quiet=True)
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Initialize lemmatizer and stopwords globally so workers can access them
+lemmatizer = WordNetLemmatizer()
+english_stops = set(stopwords.words('english'))
+
+def clean_and_lemmatize(text):
+    """Robust preprocessing: lowercase, remove URLs/HTML, remove special chars, lemmatize, remove stopwords"""
+    if not text or not isinstance(text, str):
+        return ""
+    
+    text = text.lower()
+    # Remove HTML tags
+    text = re.sub(r'<[^>]+>', '', text)
+    # Remove URLs
+    text = re.sub(r'http\S+|www\S+|https\S+', '', text, flags=re.MULTILINE)
+    # Remove mentions
+    text = re.sub(r'@\w+', '', text)
+    # Remove special characters and numbers
+    text = re.sub(r'[^a-z\s]', ' ', text)
+    
+    # Tokenize manually for NLTK lemmatization and quick stopword removal
+    words = text.split()
+    cleaned_words = [
+        lemmatizer.lemmatize(w) for w in words 
+        if w not in english_stops and len(w) > 1
+    ]
+    
+    return " ".join(cleaned_words).strip()
+
+# Register UDF
+clean_text_udf = udf(clean_and_lemmatize, StringType())
 
 def create_spark_session():
-    """Create Spark session for training"""
     return (SparkSession.builder
-        .appName("SentimentModelTraining")
+        .appName("SentimentModelTraining_Production")
         .config("spark.driver.memory", "4g")
         .config("spark.executor.memory", "4g")
         .config("spark.sql.shuffle.partitions", "200")
         .getOrCreate())
 
-
-def clean_text(text):
-    """Comprehensive text cleaning for tweets"""
-    if text is None:
-        return ""
-    
-    # Decode HTML entities
-    text = text.replace("&amp;", "&")
-    text = text.replace("&lt;", "<")
-    text = text.replace("&gt;", ">")
-    text = text.replace("&quot;", '"')
-    
-    # Remove URLs
-    text = re.sub(r'http\S+|www\S+|https\S+', '', text, flags=re.MULTILINE)
-    
-    # Remove user mentions
-    text = re.sub(r'@\w+', '', text)
-    
-    # Remove hashtag symbols but keep words
-    text = re.sub(r'#', '', text)
-    
-    # Remove RT prefix
-    text = re.sub(r'^RT[\s]+', '', text)
-    
-    # Remove special characters and numbers
-    text = re.sub(r'[^a-zA-Z\s]', '', text)
-    
-    # Convert to lowercase
-    text = text.lower()
-    
-    # Remove extra whitespace
-    text = ' '.join(text.split())
-    
-    return text.strip()
-
-
-clean_text_udf = udf(clean_text, StringType())
-
-
-def load_sentiment140(spark, data_path, sample_fraction=None):
-    """
-    Load Sentiment140 dataset
-    
-    Dataset format (no header):
-    0 - polarity (0=negative, 2=neutral, 4=positive)
-    1 - tweet id
-    2 - date
-    3 - query
-    4 - user
-    5 - text
-    """
-    logger.info(f"Loading dataset from {data_path}")
+def load_data(spark, data_path, sample_fraction):
+    logger.info(f"Loading Sentiment140 dataset from {data_path}")
     
     df = (spark.read
         .option("header", "false")
         .option("encoding", "ISO-8859-1")
         .csv(data_path)
         .toDF("polarity", "id", "date", "query", "user", "text"))
-    
-    # Sample if specified (for faster training/testing)
-    if sample_fraction:
-        df = df.sample(fraction=sample_fraction, seed=42)
-        logger.info(f"Sampled {sample_fraction*100}% of data")
-    
-    # Map polarity to sentiment labels
+        
+    if sample_fraction < 1.0:
+        logger.info(f"Sampling {sample_fraction * 100}% of data for faster training")
+        df = df.sample(withReplacement=False, fraction=sample_fraction, seed=42)
+        
+    # Sentiment140 labels: 0=Negative, 4=Positive
     df = df.withColumn(
         "sentiment",
-        when(col("polarity") == "0", "negative")
-        .when(col("polarity") == "2", "neutral")
-        .when(col("polarity") == "4", "positive")
-        .otherwise("neutral")
-    )
+        when(col("polarity") == "0", "Negative")
+        .when(col("polarity") == "4", "Positive")
+        .otherwise(None)
+    ).dropna(subset=["sentiment"])
     
-    # Clean text
+    # Apply text cleaning
+    logger.info("Applying NLTK text preprocessing...")
     df = df.withColumn("cleaned_text", clean_text_udf(col("text")))
-    
-    # Filter empty texts
     df = df.filter(col("cleaned_text") != "")
-    df = df.filter(col("cleaned_text").isNotNull())
     
-    # Select relevant columns
-    df = df.select("cleaned_text", "sentiment", "text")
-    
-    logger.info(f"Loaded {df.count()} samples")
-    
-    # Show class distribution
-    logger.info("Class distribution:")
-    df.groupBy("sentiment").count().show()
-    
-    return df
+    logger.info(f"Total training records prepared: {df.count()}")
+    return df.select("cleaned_text", "sentiment")
 
-
-def create_pipeline(num_features=10000):
-    """Create ML pipeline"""
+def build_pipeline(model_type="LR"):
+    """Builds the feature engineering and modeling pipeline"""
+    logger.info("Constructing ML Pipeline...")
     
-    # Tokenization
-    tokenizer = Tokenizer(
-        inputCol="cleaned_text", 
-        outputCol="words"
+    # Text tokenization
+    tokenizer = Tokenizer(inputCol="cleaned_text", outputCol="words")
+    
+    # Unigrams Feature Extraction
+    cv_unigram = CountVectorizer(inputCol="words", outputCol="tf_unigram", vocabSize=10000, minDF=5.0)
+    idf_unigram = IDF(inputCol="tf_unigram", outputCol="tfidf_unigram")
+    
+    # Bigrams Feature Extraction
+    bigram = NGram(n=2, inputCol="words", outputCol="bigrams")
+    cv_bigram = CountVectorizer(inputCol="bigrams", outputCol="tf_bigram", vocabSize=5000, minDF=3.0)
+    idf_bigram = IDF(inputCol="tf_bigram", outputCol="tfidf_bigram")
+    
+    # Combine Features
+    assembler = VectorAssembler(
+        inputCols=["tfidf_unigram", "tfidf_bigram"],
+        outputCol="features"
     )
     
-    # Remove stop words
-    remover = StopWordsRemover(
-        inputCol="words", 
-        outputCol="filtered_words"
-    )
+    # Label indexing
+    label_indexer = StringIndexer(inputCol="sentiment", outputCol="label", handleInvalid="keep")
     
-    # Term frequency with hashing
-    hashing_tf = HashingTF(
-        inputCol="filtered_words", 
-        outputCol="raw_features",
-        numFeatures=num_features
-    )
-    
-    # IDF
-    idf = IDF(
-        inputCol="raw_features", 
-        outputCol="features",
-        minDocFreq=5
-    )
-    
-    # Label indexer
-    label_indexer = StringIndexer(
-        inputCol="sentiment", 
-        outputCol="label",
-        handleInvalid="keep"
-    )
-    
-    # Logistic Regression
-    lr = LogisticRegression(
-        featuresCol="features",
-        labelCol="label",
-        predictionCol="prediction",
-        probabilityCol="probability",
-        maxIter=100,
-        regParam=0.01,
-        elasticNetParam=0.8
-    )
-    
-    # Convert prediction back to label
+    # Model Selection
+    if model_type == "NB":
+        logger.info("Using Multinomial Naive Bayes model")
+        classifier = NaiveBayes(
+            featuresCol="features",
+            labelCol="label",
+            predictionCol="prediction",
+            probabilityCol="probability"
+        )
+    else:
+        logger.info("Using Logistic Regression model")
+        classifier = LogisticRegression(
+            featuresCol="features",
+            labelCol="label",
+            predictionCol="prediction",
+            probabilityCol="probability",
+            maxIter=100,
+            regParam=0.01
+        )
+        
+    # Map index back to string
     label_converter = IndexToString(
         inputCol="prediction",
-        outputCol="predicted_sentiment",
-        labels=["negative", "neutral", "positive"]
+        outputCol="predicted_label",
+        labels=label_indexer.fit(
+            # Dummy DataFrame to fit StringIndexer only for getting labels
+            SparkSession.builder.getOrCreate().createDataFrame([("Negative",), ("Positive",)], ["sentiment"])
+        ).labels
     )
     
     pipeline = Pipeline(stages=[
-        tokenizer,
-        remover,
-        hashing_tf,
-        idf,
-        label_indexer,
-        lr,
-        label_converter
+        tokenizer, cv_unigram, idf_unigram,
+        bigram, cv_bigram, idf_bigram,
+        assembler, label_indexer, classifier, label_converter
     ])
     
     return pipeline
 
-
-def train_with_cross_validation(pipeline, train_df):
-    """Train with cross-validation for hyperparameter tuning"""
-    
-    # Get logistic regression stage
-    lr = pipeline.getStages()[-2]
-    
-    # Parameter grid
-    param_grid = (ParamGridBuilder()
-        .addGrid(lr.regParam, [0.001, 0.01, 0.1])
-        .addGrid(lr.elasticNetParam, [0.0, 0.5, 0.8, 1.0])
-        .build())
-    
-    # Evaluator
-    evaluator = MulticlassClassificationEvaluator(
-        labelCol="label",
-        predictionCol="prediction",
-        metricName="accuracy"
-    )
-    
-    # Cross validator
-    cv = CrossValidator(
-        estimator=pipeline,
-        estimatorParamMaps=param_grid,
-        evaluator=evaluator,
-        numFolds=3,
-        parallelism=2
-    )
-    
-    logger.info("Starting cross-validation training...")
-    cv_model = cv.fit(train_df)
-    
-    logger.info(f"Best model params: {cv_model.bestModel.stages[-2].extractParamMap()}")
-    
-    return cv_model.bestModel
-
-
-def evaluate_model(model, test_df):
-    """Evaluate model performance"""
-    predictions = model.transform(test_df)
-    
-    # Accuracy
-    accuracy_evaluator = MulticlassClassificationEvaluator(
-        labelCol="label",
-        predictionCol="prediction",
-        metricName="accuracy"
-    )
-    accuracy = accuracy_evaluator.evaluate(predictions)
-    
-    # Precision
-    precision_evaluator = MulticlassClassificationEvaluator(
-        labelCol="label",
-        predictionCol="prediction",
-        metricName="weightedPrecision"
-    )
-    precision = precision_evaluator.evaluate(predictions)
-    
-    # Recall
-    recall_evaluator = MulticlassClassificationEvaluator(
-        labelCol="label",
-        predictionCol="prediction",
-        metricName="weightedRecall"
-    )
-    recall = recall_evaluator.evaluate(predictions)
-    
-    # F1 Score
-    f1_evaluator = MulticlassClassificationEvaluator(
-        labelCol="label",
-        predictionCol="prediction",
-        metricName="f1"
-    )
-    f1 = f1_evaluator.evaluate(predictions)
-    
-    logger.info("=" * 50)
-    logger.info("Model Evaluation Results:")
-    logger.info(f"  Accuracy:  {accuracy:.4f}")
-    logger.info(f"  Precision: {precision:.4f}")
-    logger.info(f"  Recall:    {recall:.4f}")
-    logger.info(f"  F1 Score:  {f1:.4f}")
-    logger.info("=" * 50)
-    
-    # Show confusion matrix
-    logger.info("\nPrediction Distribution:")
-    predictions.groupBy("sentiment", "predicted_sentiment").count().show()
-    
-    return {
-        "accuracy": accuracy,
-        "precision": precision,
-        "recall": recall,
-        "f1": f1
-    }
-
-
 def main():
-    parser = argparse.ArgumentParser(description="Train sentiment analysis model")
-    parser.add_argument("--data", type=str, required=True, help="Path to Sentiment140 CSV")
-    parser.add_argument("--output", type=str, required=True, help="Path to save model")
-    parser.add_argument("--sample", type=float, default=None, help="Sample fraction (0-1)")
-    parser.add_argument("--cv", action="store_true", help="Use cross-validation")
-    parser.add_argument("--features", type=int, default=10000, help="Number of TF features")
-    
+    parser = argparse.ArgumentParser(description="Professional Sentiment Analysis Training")
+    parser.add_argument("--data", type=str, default="data/sentiment140.csv", help="Path to Sentiment140 dataset")
+    parser.add_argument("--output", type=str, default="models/sentiment_model_prod", help="Path to save the model")
+    parser.add_argument("--sample", type=float, default=0.05, help="Fraction of data to train on")
+    parser.add_argument("--model", type=str, choices=["LR", "NB"], default="LR", help="Model type: LR (LogisticRegression) or NB (NaiveBayes)")
     args = parser.parse_args()
     
-    # Create Spark session
     spark = create_spark_session()
     spark.sparkContext.setLogLevel("WARN")
     
-    logger.info("=" * 60)
-    logger.info("Sentiment Analysis Model Training")
-    logger.info("=" * 60)
-    
-    # Load data
-    df = load_sentiment140(spark, args.data, args.sample)
-    
-    # Split data
+    # Load and prepare data
+    df = load_data(spark, args.data, args.sample)
     train_df, test_df = df.randomSplit([0.8, 0.2], seed=42)
-    logger.info(f"Training samples: {train_df.count()}")
-    logger.info(f"Test samples: {test_df.count()}")
     
-    # Create pipeline
-    pipeline = create_pipeline(args.features)
+    pipeline = build_pipeline(args.model)
     
-    # Train model
-    if args.cv:
-        model = train_with_cross_validation(pipeline, train_df)
-    else:
-        logger.info("Training model...")
-        model = pipeline.fit(train_df)
+    logger.info("Training Model... This may take several minutes.")
+    model = pipeline.fit(train_df)
     
-    # Evaluate
-    metrics = evaluate_model(model, test_df)
+    logger.info("Evaluating Model...")
+    predictions = model.transform(test_df)
+    evaluator = MulticlassClassificationEvaluator(labelCol="label", predictionCol="prediction", metricName="accuracy")
+    accuracy = evaluator.evaluate(predictions)
+    logger.info(f"Model Accuracy: {accuracy:.4f}")
     
-    # Save model
-    logger.info(f"Saving model to {args.output}")
+    # Save the pipeline model natively
+    logger.info(f"Saving fully assembled PipelineModel to {args.output}")
+    # Clear the labelCol safely before saving if we want to run inference on unlabeled data
+    model.stages[-2].set(model.stages[-2].labelCol, "")
     model.write().overwrite().save(args.output)
-    
-    # Save metrics
-    metrics_path = os.path.join(args.output, "metrics.json")
-    import json
-    with open(metrics_path, "w") as f:
-        json.dump(metrics, f, indent=2)
-    
-    logger.info("Training complete!")
+    logger.info("Model saved successfully! Ready for streaming.")
     
     spark.stop()
-
 
 if __name__ == "__main__":
     main()
