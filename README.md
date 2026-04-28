@@ -156,27 +156,27 @@ sentiment/stream-sentiment/
 ### 🖥️ Main Dashboard
 Real-time sentiment analysis dashboard with live RSS streaming and insights.
 
-![Dashboard](./sentiment/stream-sentiment/assets/dashboard.png)
+![Dashboard](assets\architecture.png)
 
 ---
 
 ### 📊 Sentiment Trends & Distribution
 Visualizes sentiment trends over time and overall distribution.
 
-![Charts](./sentiment/stream-sentiment/assets/charts.png)
+![Charts](assets\charts.png)
 
 ---
 
 ### 🧠 Sentiment Insight Panel
 Shows reasoning behind sentiment classification with confidence and keywords.
 
-![Insight](./sentiment/stream-sentiment/assets/insight.png)
+![Insight](assets\dashboard.png)
 
 ---
 
 ### 🏗️ System Architecture
 Kafka-based real-time streaming pipeline architecture.
 
-![Architecture](./sentiment/stream-sentiment/assets/architecture.png)
+![Architecture](assets\insight.png)
 
 **Need help?** Check the [SETUP_GUIDE.md](./SETUP_GUIDE.md) for detailed instructions!
