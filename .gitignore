@@ -22,3 +22,10 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+spark/data/sentiment140.csv
+spark/models/
+*.csv
+*.parquet
+*.h5
+*.pkl
